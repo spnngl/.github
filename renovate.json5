@@ -1,0 +1,14 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    // The shared preset at HEAD of main, not the one of the pull request.
+    "extends": ["github>spnngl/.github:renovate.default.json5"],
+    "packageRules": [
+        // Renovate updates itself A LOT, keep some stability by updating once a week.
+        {
+            "description": "Renovate image (validator workflow): weekly. Automerge of minor/patch/digest comes from the shared preset.",
+            "matchDepNames": ["ghcr.io/renovatebot/renovate"],
+            "schedule": ["before 5am on Monday"],
+            "automergeSchedule": ["before 5am on Monday"]
+        }
+    ]
+}

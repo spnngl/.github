@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://www.schemastore.org/zizmor.json
+
+rules:
+  # actionlint (1.7.12) rejects the `$/...` self-repository syntax.
+  self-repository:
+    disable: true
+  # Own actions are called at `@main` on purpose (README.md).
+  unpinned-uses:
+    config:
+      policies:
+        "spnngl/*": ref-pin
