@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+# Checks of this repository. The shared workflows are called through local
+# paths, so a pull request runs its own version of them. Not the setup-betterleaks
+# action: the workflows call it at `@main`.
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
+          # renovate: datasource=pypi depName=zizmor
+          version: "1.30.1"
+
+  conventional-commits:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/conventional-commits.yml
+
+  betterleaks:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/betterleaks.yml
+
+  renovate:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/renovate.yml
+    with:
+      config-files: renovate.json5 renovate.default.json5
