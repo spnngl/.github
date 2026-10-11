@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+# Reusable: scans the pull requests, issues and issue comments of the calling
+# repository for secrets and uploads the findings to code scanning. Meant for
+# a `schedule` trigger. The job needs `contents: read`, `issues: read`,
+# `pull-requests: read` and `security-events: write`.
+
+name: Secret Scanning (betterleaks-github)
+
+on:
+  workflow_call:
+    inputs:
+      confidence:
+        description: Minimum confidence of reported findings (`--confidence`).
+        type: string
+        default: medium
+
+permissions: {}
+
+jobs:
+  betterleaks-github:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      security-events: write
+    steps:
+      # Only for `.betterleaks.toml` and `.betterleaksignore`: the scan target
+      # is the GitHub API.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Remote, not `./`: a local path would resolve in the caller's checkout.
+      - name: Install betterleaks
+        uses: spnngl/.github/.github/actions/setup-betterleaks@main
+
+      - name: Run betterleaks
+        env:
+          CONFIDENCE: ${{ inputs.confidence }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Explicit: a URL scan target never loads it.
+          config=()
+          if [[ -f .betterleaks.toml ]]; then config=(--config .betterleaks.toml); fi
+          betterleaks github \
+            "${config[@]}" \
+            --verbose \
+            --redact \
+            --validation \
+            --timeout=300 \
+            --confidence="$CONFIDENCE" \
+            --include=prs,issues,issue-comments \
+            --report-format sarif \
+            --report-path betterleaks.sarif \
+            --exit-code 2 \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('betterleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: betterleaks.sarif
+          category: betterleaks-github

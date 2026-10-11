@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+# Reusable: checks that the subject of every commit of the calling pull request
+# follows Conventional Commits (`type(scope)!: description`, scope and `!`
+# optional). Merge commits are skipped. Call it from a `pull_request` workflow;
+# the job needs `contents: read` and `pull-requests: read`.
+
+name: Conventional Commits
+
+on:
+  workflow_call:
+    inputs:
+      allowed-commit-types:
+        description: Comma-separated list of allowed commit types.
+        type: string
+        default: "feat,fix,docs,style,refactor,perf,test,build,ci,chore,revert"
+
+permissions: {}
+
+jobs:
+  check:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # Reads the commits from the GitHub API, no checkout needed.
+      - name: Check commit subjects
+        env:
+          ALLOWED_TYPES: ${{ inputs.allowed-commit-types }}
+          COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "::error::Call this workflow from a pull_request event."
+            exit 1
+          fi
+          # The API lists at most 250 commits of a pull request.
+          if (( COMMIT_COUNT > 250 )); then
+            echo "::error::$COMMIT_COUNT commits, only 250 can be checked."
+            exit 1
+          fi
+          types="${ALLOWED_TYPES// /}"
+          if [[ ! "$types" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
+            echo "::error::Invalid allowed-commit-types: $ALLOWED_TYPES"
+            exit 1
+          fi
+          pattern="^(${types//,/|})(\([^)]+\))?!?: [^ ]"
+
+          commits="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" \
+            --jq '.[] | select(.parents | length == 1) | [.sha[:7], (.commit.message | split("\n")[0])] | @tsv')"
+
+          failed=0
+          while IFS=$'\t' read -r sha subject; do
+            [[ -n "$sha" ]] || continue # Only merge commits.
+            if [[ "$subject" =~ $pattern ]]; then
+              echo "OK   $sha $subject"
+            else
+              echo "::error title=Not a Conventional Commit::$sha $subject"
+              failed=1
+            fi
+          done <<< "$commits"
+          if (( failed )); then
+            echo "Allowed types: ${types//,/, }"
+          fi
+          exit "$failed"

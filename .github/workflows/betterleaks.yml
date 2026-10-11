@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+# Reusable: scans the full git history of the calling repository for secrets
+# and uploads the findings to code scanning. The job needs `contents: read` and
+# `security-events: write`. betterleaks reads `.betterleaks.toml` and
+# `.betterleaksignore` from the repository root. Pull requests from forks get a
+# read-only token: they are scanned, but their findings are not uploaded.
+
+name: Secret Scanning (betterleaks)
+
+on:
+  workflow_call:
+    inputs:
+      confidence:
+        description: Minimum confidence of reported findings (`--confidence`).
+        type: string
+        default: medium
+
+permissions: {}
+
+jobs:
+  betterleaks:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Remote, not `./`: a local path would resolve in the caller's checkout.
+      - name: Install betterleaks
+        uses: spnngl/.github/.github/actions/setup-betterleaks@main
+
+      - name: Run betterleaks
+        env:
+          CONFIDENCE: ${{ inputs.confidence }}
+        run: |
+          # Explicit: betterleaks 2 no longer loads it from the scan target.
+          config=()
+          if [[ -f .betterleaks.toml ]]; then config=(--config .betterleaks.toml); fi
+          betterleaks git \
+            "${config[@]}" \
+            --verbose \
+            --redact \
+            --timeout=120 \
+            --confidence="$CONFIDENCE" \
+            --report-format sarif \
+            --report-path betterleaks.sarif \
+            --exit-code 2 \
+            "$GITHUB_WORKSPACE"
+
+      - name: Upload SARIF to code scanning
+        if: >-
+          always() && hashFiles('betterleaks.sarif') != '' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: betterleaks.sarif
+          category: betterleaks
