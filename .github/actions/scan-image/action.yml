@@ -1,0 +1,160 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-action.json
+
+# Scans one container image for vulnerabilities with Grype and Trivy, both
+# pinned below and checksum-verified. Two scanners because their data
+# differs: Trivy has no Fedora vulnerability data (it detects the OS, then
+# skips its packages), Grype has (Fedora's Bodhi updates).
+#
+# The image is either `image`, a registry reference, pulled with the
+# runner's registry credentials (docker login), with `platform`; or
+# `oci-layout`, an OCI layout directory holding one single-platform image,
+# the way to scan an image that was built but not pushed (podman save
+# --format oci-dir, buildx --output type=oci,tar=false).
+#
+# Both scanners read their ignore files from the working directory:
+# `.grype.yaml` (`ignore:` rules) and `.trivyignore.yaml`. Every finding is
+# logged; the job summary counts them and lists the Critical ones with a
+# fix. With `fail: true`, such a finding fails the step: one without a fix
+# is nothing a change can act on. The SARIF outputs keep High and Critical
+# findings only (each tool's own severity): code scanning is for what is
+# worth triaging.
+#
+# Linux x64 and arm64 runners.
+
+name: Scan image
+description: Scan a container image for vulnerabilities with Grype and Trivy.
+
+inputs:
+  image:
+    description: Registry reference of the image to scan, e.g. `ghcr.io/owner/name:tag`. Exclusive with `oci-layout`.
+    default: ""
+  platform:
+    description: Platform of `image` to scan, e.g. `linux/arm64`. Required with `image`.
+    default: ""
+  oci-layout:
+    description: Path of an OCI layout directory holding the image to scan. Exclusive with `image`.
+    default: ""
+  fail:
+    description: "`true`: fail on a Critical vulnerability with a fix available. `false`: report only."
+    required: true
+
+outputs:
+  grype-sarif:
+    description: Path of Grype's SARIF report, High and Critical findings only.
+    value: ${{ steps.scan.outputs.grype-sarif }}
+  trivy-sarif:
+    description: Path of Trivy's SARIF report, High and Critical findings only.
+    value: ${{ steps.scan.outputs.trivy-sarif }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Grype and Trivy
+      shell: bash
+      env:
+        # renovate: datasource=github-releases depName=anchore/grype
+        GRYPE_VERSION: "0.120.1"
+        # renovate: datasource=github-releases depName=aquasecurity/trivy
+        TRIVY_VERSION: "0.75.0"
+      run: |
+        set -euo pipefail
+        case "$RUNNER_ARCH" in
+          X64) grype_arch=amd64 trivy_arch=64bit ;;
+          ARM64) grype_arch=arm64 trivy_arch=ARM64 ;;
+          *) echo "::error::unsupported runner architecture: $RUNNER_ARCH"; exit 1 ;;
+        esac
+        mkdir -p "$RUNNER_TEMP/scan-image/bin"
+        cd "$RUNNER_TEMP/scan-image/bin"
+        # <name> <release base URL> <tarball> <checksums file>
+        install_release() {
+          curl -sSfL --proto '=https' --proto-redir '=https' -O "$2/$3" -O "$2/$4"
+          sha256sum -c --ignore-missing "$4"
+          tar -xzf "$3" "$1"
+          sudo install -m 0755 "$1" "/usr/local/bin/$1"
+          "$1" version
+        }
+        install_release grype "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}" \
+          "grype_${GRYPE_VERSION}_linux_${grype_arch}.tar.gz" "grype_${GRYPE_VERSION}_checksums.txt"
+        install_release trivy "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}" \
+          "trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz" "trivy_${TRIVY_VERSION}_checksums.txt"
+
+    - id: scan
+      name: Scan
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PLATFORM: ${{ inputs.platform }}
+        OCI_LAYOUT: ${{ inputs.oci-layout }}
+        FAIL: ${{ inputs.fail }}
+      run: |-
+        set -euo pipefail
+        case "$FAIL" in
+          true | false) ;;
+          *) echo "::error::fail: \`true\` or \`false\`, not \`$FAIL\`"; exit 1 ;;
+        esac
+        # Each scanner's syntax for the image.
+        if [[ -n "$IMAGE" && -z "$OCI_LAYOUT" && -n "$PLATFORM" ]]; then
+          grype_source=("registry:$IMAGE" --platform "$PLATFORM")
+          trivy_source=(--image-src remote --platform "$PLATFORM" "$IMAGE")
+        elif [[ -n "$OCI_LAYOUT" && -z "$IMAGE" && -z "$PLATFORM" ]]; then
+          grype_source=("oci-dir:$OCI_LAYOUT")
+          trivy_source=(--input "$OCI_LAYOUT")
+        else
+          echo "::error::either image and platform, or oci-layout"
+          exit 1
+        fi
+        out="$RUNNER_TEMP/scan-image"
+        mkdir -p "$out"
+
+        # Grype can't convert its JSON report: one run, every format.
+        grype "${grype_source[@]}" -o table -o "json=$out/grype.json" -o "sarif=$out/grype.sarif"
+
+        # Trivy can: scan to JSON, then render. vuln only: the default also
+        # looks for secrets, which are betterleaks' job, at the source. Trivy
+        # rejects a missing --ignorefile.
+        trivy_ignore=()
+        if [[ -f .trivyignore.yaml ]]; then trivy_ignore=(--ignorefile .trivyignore.yaml); fi
+        trivy image --scanners vuln "${trivy_ignore[@]}" --format json --output "$out/trivy.json" "${trivy_source[@]}"
+        trivy convert --format table "$out/trivy.json"
+        trivy convert --format sarif --output "$out/trivy.sarif" "$out/trivy.json"
+
+        # SARIF: each tool maps High and Critical to the `error` level.
+        for tool in grype trivy; do
+          jq '.runs[].results |= map(select(.level == "error"))' "$out/$tool.sarif" > "$out/$tool.sarif.tmp"
+          mv "$out/$tool.sarif.tmp" "$out/$tool.sarif"
+          echo "$tool-sarif=$out/$tool.sarif" >> "$GITHUB_OUTPUT"
+        done
+
+        # Findings as {tool, id, package, version, fix, severity, fixed},
+        # severity in lower case: both reports in one shape.
+        {
+          jq -c '.matches[] | {tool: "grype", id: .vulnerability.id, package: .artifact.name,
+            version: .artifact.version, fix: (.vulnerability.fix.versions // [] | join(", ")),
+            severity: (.vulnerability.severity | ascii_downcase), fixed: (.vulnerability.fix.state == "fixed")}' "$out/grype.json"
+          jq -c '.Results[]?.Vulnerabilities[]? | {tool: "trivy", id: .VulnerabilityID, package: .PkgName,
+            version: .InstalledVersion, fix: (.FixedVersion // ""),
+            severity: (.Severity | ascii_downcase), fixed: (.Status == "fixed")}' "$out/trivy.json"
+        } | jq -s . > "$out/findings.json"
+
+        # Other: Grype's Negligible, both tools' Unknown.
+        jq -r --arg image "${IMAGE:-$OCI_LAYOUT}${PLATFORM:+ $PLATFORM}" '
+          def count($s): map(select(.severity == $s)) | length;
+          . as $all
+          | "### Vulnerabilities of `\($image)`", "",
+            "| Scanner | Critical | High | Medium | Low | Other |", "| --- | --: | --: | --: | --: | --: |",
+            (("grype", "trivy") as $tool | $all | map(select(.tool == $tool))
+              | "| \($tool) | \(count("critical")) | \(count("high")) | \(count("medium")) | \(count("low")) | \(length - count("critical") - count("high") - count("medium") - count("low")) |"),
+            "",
+            ($all | map(select(.severity == "critical" and .fixed)) | unique | sort_by(.id, .package, .tool)
+              | if length == 0 then "No Critical vulnerability with a fix."
+                else "Critical, with a fix:", "", "| Scanner | Vulnerability | Package | Version | Fixed in |", "| --- | --- | --- | --- | --- |",
+                  (.[] | "| \(.tool) | \(.id) | \(.package) | \(.version) | \(.fix) |")
+                end)
+        ' "$out/findings.json" >> "$GITHUB_STEP_SUMMARY"
+
+        # Found by both scanners: counted once.
+        fixable="$(jq 'map(select(.severity == "critical" and .fixed) | {id, package}) | unique | length' "$out/findings.json")"
+        if [[ "$FAIL" == true && "$fixable" != 0 ]]; then
+          echo "::error::$fixable Critical vulnerabilities with a fix, see the job summary"
+          exit 1
+        fi

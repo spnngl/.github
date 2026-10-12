@@ -9,6 +9,13 @@
             "matchDepNames": ["ghcr.io/renovatebot/renovate"],
             "schedule": ["before 5am on Monday"],
             "automergeSchedule": ["before 5am on Monday"]
+        },
+        // A compromised release is usually caught and pulled within days,
+        // and the preset automerges these updates.
+        {
+            "description": "Scanners of the scan-image action: only releases a week old.",
+            "matchDepNames": ["anchore/grype", "aquasecurity/trivy"],
+            "minimumReleaseAge": "7 days"
         }
     ]
 }
