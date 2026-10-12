@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
 
 # Checks of this repository. The shared workflows are called through local
-# paths, so a pull request runs its own version of them. Not the setup-betterleaks
-# action: the workflows call it at `@main`.
+# paths, so a pull request runs its own version of them. Not the actions
+# (setup-betterleaks, scan-image): the workflows call them at `@main`.
 
 name: CI
 
@@ -50,6 +50,14 @@ jobs:
       contents: read
       security-events: write
     uses: ./.github/workflows/betterleaks.yml
+
+  # No package here: tests the workflow's wiring only.
+  image-scan:
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/image-scan.yml
 
   renovate:
     permissions:

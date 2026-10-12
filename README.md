@@ -14,6 +14,7 @@ shared Renovate preset keeps Renovate from pinning these references.
 | [`betterleaks.yml`](.github/workflows/betterleaks.yml): secrets in the git history | `pull_request` | `contents: read`, `security-events: write` | `confidence` |
 | [`betterleaks-github.yml`](.github/workflows/betterleaks-github.yml): secrets in PRs, issues, comments | `schedule` | `contents: read`, `issues: read`, `pull-requests: read`, `security-events: write` | `confidence` |
 | [`renovate.yml`](.github/workflows/renovate.yml): `renovate-config-validator --strict` | `pull_request` / `push` on the Renovate config | `contents: read` | `config-files` |
+| [`image-scan.yml`](.github/workflows/image-scan.yml): vulnerabilities in the repository's ghcr.io images, with `scan-image` | `schedule` | `contents: read`, `packages: read`, `security-events: write` | `packages`, `max-age-days` |
 
 A called workflow gets at most the permissions of the calling job, so grant
 them there:
@@ -59,6 +60,27 @@ merged; CI here tests the version on `main`.
 ```yaml
 - uses: spnngl/.github/.github/actions/setup-betterleaks@main
 ```
+
+[`scan-image`](.github/actions/scan-image/action.yml): scans one image with
+Grype and Trivy (both, Trivy has no Fedora data), pinned and
+checksum-verified. Logs every finding, sums them up in the job summary, and
+with `fail: true` fails on a Critical vulnerability with a fix. Its SARIF
+outputs (`grype-sarif`, `trivy-sarif`) keep the High and Critical findings.
+Ignore files, at the repository root: `.grype.yaml` (`ignore:` rules) and
+`.trivyignore.yaml`. `image-scan.yml` uses it on the pushed images; to scan
+an image that is built but not pushed, in the build job, give its OCI
+layout:
+
+```yaml
+- run: podman save --format oci-dir -o "$RUNNER_TEMP/oci" "$TAG"
+- uses: spnngl/.github/.github/actions/scan-image@main
+  with:
+    oci-layout: ${{ runner.temp }}/oci
+    fail: true
+```
+
+A registry image instead: `image: ghcr.io/<owner>/<name>:<tag>` and
+`platform: linux/<arch>`.
 
 ## Renovate preset
 
