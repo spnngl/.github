@@ -14,10 +14,18 @@
 # Both scanners read their ignore files from the working directory:
 # `.grype.yaml` (`ignore:` rules) and `.trivyignore.yaml`. Every finding is
 # logged; the job summary counts them and lists the Critical ones with a
-# fix. With `fail: true`, such a finding fails the step: one without a fix
+# fix (not in `baseline`, with one). With `fail: true`, such a finding fails the step: one without a fix
 # is nothing a change can act on. The SARIF outputs keep High and Critical
 # findings only (each tool's own severity): code scanning is for what is
 # worth triaging.
+#
+# `baseline`, for pull requests: the image the scanned one replaces, e.g.
+# its pushed tag, scanned with the same databases. Only the findings it
+# doesn't have fail: most come with upstream's binaries (base image,
+# vendor packages), which no change of the caller fixes, and a newly
+# published vulnerability shows up in both. A baseline that can't be
+# scanned, e.g. not pushed yet (a new image, or a version bump), fails
+# nothing: blocking a version bump would keep the older image.
 #
 # Linux x64 and arm64 runners.
 
@@ -28,11 +36,14 @@ inputs:
   image:
     description: Registry reference of the image to scan, e.g. `ghcr.io/owner/name:tag`. Exclusive with `oci-layout`.
     default: ""
-  platform:
-    description: Platform of `image` to scan, e.g. `linux/arm64`. Required with `image`.
-    default: ""
   oci-layout:
     description: Path of an OCI layout directory holding the image to scan. Exclusive with `image`.
+    default: ""
+  platform:
+    description: Platform of `image` and `baseline` to scan, e.g. `linux/arm64`. Required with either.
+    default: ""
+  baseline:
+    description: Registry reference of the image the scanned one replaces. With `fail`, only the findings it doesn't have fail.
     default: ""
   fail:
     description: "`true`: fail on a Critical vulnerability with a fix available. `false`: report only."
@@ -83,8 +94,9 @@ runs:
       shell: bash
       env:
         IMAGE: ${{ inputs.image }}
-        PLATFORM: ${{ inputs.platform }}
         OCI_LAYOUT: ${{ inputs.oci-layout }}
+        PLATFORM: ${{ inputs.platform }}
+        BASELINE: ${{ inputs.baseline }}
         FAIL: ${{ inputs.fail }}
       run: |-
         set -euo pipefail
@@ -92,29 +104,59 @@ runs:
           true | false) ;;
           *) echo "::error::fail: \`true\` or \`false\`, not \`$FAIL\`"; exit 1 ;;
         esac
-        # Each scanner's syntax for the image.
-        if [[ -n "$IMAGE" && -z "$OCI_LAYOUT" && -n "$PLATFORM" ]]; then
-          grype_source=("registry:$IMAGE" --platform "$PLATFORM")
-          trivy_source=(--image-src remote --platform "$PLATFORM" "$IMAGE")
-        elif [[ -n "$OCI_LAYOUT" && -z "$IMAGE" && -z "$PLATFORM" ]]; then
-          grype_source=("oci-dir:$OCI_LAYOUT")
-          trivy_source=(--input "$OCI_LAYOUT")
-        else
-          echo "::error::either image and platform, or oci-layout"
+        if [[ -n "$IMAGE" && -n "$OCI_LAYOUT" || -z "$IMAGE$OCI_LAYOUT" ]]; then
+          echo "::error::either image or oci-layout"
+          exit 1
+        fi
+        if [[ -n "$IMAGE$BASELINE" && -z "$PLATFORM" ]]; then
+          echo "::error::platform: required with image or baseline"
           exit 1
         fi
         out="$RUNNER_TEMP/scan-image"
         mkdir -p "$out"
+        # vuln only: Trivy's default also looks for secrets, which are
+        # betterleaks' job, at the source. Trivy rejects a missing
+        # --ignorefile.
+        trivy_args=(--scanners vuln)
+        if [[ -f .trivyignore.yaml ]]; then trivy_args+=(--ignorefile .trivyignore.yaml); fi
 
-        # Grype can't convert its JSON report: one run, every format.
-        grype "${grype_source[@]}" -o table -o "json=$out/grype.json" -o "sarif=$out/grype.sarif"
+        # scan <source> <dir> [Grype outputs]: both scanners' JSON reports
+        # in <dir>. <source>, in Grype's syntax: registry:<ref> (of
+        # $PLATFORM) or oci-dir:<path>. One && list, so that its status is
+        # the scan's in `if scan`, where errexit doesn't apply.
+        scan() {
+          local source="$1" dir="$2" grype_source trivy_source
+          shift 2
+          case "$source" in
+            registry:*)
+              grype_source=("$source" --platform "$PLATFORM")
+              trivy_source=(--image-src remote --platform "$PLATFORM" "${source#registry:}") ;;
+            oci-dir:*)
+              grype_source=("$source")
+              trivy_source=(--input "${source#oci-dir:}") ;;
+          esac
+          mkdir -p "$dir" &&
+            grype "${grype_source[@]}" -o "json=$dir/grype.json" "$@" &&
+            trivy image "${trivy_args[@]}" --format json --output "$dir/trivy.json" "${trivy_source[@]}"
+        }
 
-        # Trivy can: scan to JSON, then render. vuln only: the default also
-        # looks for secrets, which are betterleaks' job, at the source. Trivy
-        # rejects a missing --ignorefile.
-        trivy_ignore=()
-        if [[ -f .trivyignore.yaml ]]; then trivy_ignore=(--ignorefile .trivyignore.yaml); fi
-        trivy image --scanners vuln "${trivy_ignore[@]}" --format json --output "$out/trivy.json" "${trivy_source[@]}"
+        # findings <dir>: both reports in one shape, an array of {tool, id,
+        # package, version, fix, severity, fixed}, severity in lower case.
+        findings() {
+          {
+            jq -c '.matches[] | {tool: "grype", id: .vulnerability.id, package: .artifact.name,
+              version: .artifact.version, fix: (.vulnerability.fix.versions // [] | join(", ")),
+              severity: (.vulnerability.severity | ascii_downcase), fixed: (.vulnerability.fix.state == "fixed")}' "$1/grype.json"
+            jq -c '.Results[]?.Vulnerabilities[]? | {tool: "trivy", id: .VulnerabilityID, package: .PkgName,
+              version: .InstalledVersion, fix: (.FixedVersion // ""),
+              severity: (.Severity | ascii_downcase), fixed: (.Status == "fixed")}' "$1/trivy.json"
+          } | jq -s .
+        }
+
+        if [[ -n "$IMAGE" ]]; then source="registry:$IMAGE"; else source="oci-dir:$OCI_LAYOUT"; fi
+        # Grype can't convert its JSON report: every format in one run.
+        # Trivy can.
+        scan "$source" "$out" -o table -o "sarif=$out/grype.sarif"
         trivy convert --format table "$out/trivy.json"
         trivy convert --format sarif --output "$out/trivy.sarif" "$out/trivy.json"
 
@@ -125,36 +167,48 @@ runs:
           echo "$tool-sarif=$out/$tool.sarif" >> "$GITHUB_OUTPUT"
         done
 
-        # Findings as {tool, id, package, version, fix, severity, fixed},
-        # severity in lower case: both reports in one shape.
-        {
-          jq -c '.matches[] | {tool: "grype", id: .vulnerability.id, package: .artifact.name,
-            version: .artifact.version, fix: (.vulnerability.fix.versions // [] | join(", ")),
-            severity: (.vulnerability.severity | ascii_downcase), fixed: (.vulnerability.fix.state == "fixed")}' "$out/grype.json"
-          jq -c '.Results[]?.Vulnerabilities[]? | {tool: "trivy", id: .VulnerabilityID, package: .PkgName,
-            version: .InstalledVersion, fix: (.FixedVersion // ""),
-            severity: (.Severity | ascii_downcase), fixed: (.Status == "fixed")}' "$out/trivy.json"
-        } | jq -s . > "$out/findings.json"
+        # The baseline's findings. One that can't be scanned gates nothing.
+        echo '[]' > "$out/baseline.json"
+        if [[ -n "$BASELINE" ]]; then
+          echo "::group::Baseline: $BASELINE"
+          if scan "registry:$BASELINE" "$out/baseline"; then
+            findings "$out/baseline" > "$out/baseline.json"
+          else
+            echo "::warning::baseline $BASELINE not scanned, nothing fails"
+            BASELINE="" FAIL=false
+          fi
+          echo "::endgroup::"
+        fi
+        findings "$out" > "$out/findings.json"
+
+        # The gate: Critical with a fix, not in the baseline (by
+        # vulnerability and package).
+        jq --slurpfile baseline "$out/baseline.json" '
+          ($baseline[0] | map({id, package})) as $old
+          | map(select(.severity == "critical" and .fixed and ({id, package} | IN($old[]) | not)))
+          | unique | sort_by(.id, .package, .tool)
+        ' "$out/findings.json" > "$out/gate.json"
 
         # Other: Grype's Negligible, both tools' Unknown.
-        jq -r --arg image "${IMAGE:-$OCI_LAYOUT}${PLATFORM:+ $PLATFORM}" '
+        heading="Critical, with a fix${BASELINE:+, not in \`$BASELINE\`}"
+        jq -r --arg image "${IMAGE:-$OCI_LAYOUT}${PLATFORM:+ $PLATFORM}" --arg heading "$heading" --slurpfile gate "$out/gate.json" '
           def count($s): map(select(.severity == $s)) | length;
           . as $all
           | "### Vulnerabilities of `\($image)`", "",
             "| Scanner | Critical | High | Medium | Low | Other |", "| --- | --: | --: | --: | --: | --: |",
             (("grype", "trivy") as $tool | $all | map(select(.tool == $tool))
               | "| \($tool) | \(count("critical")) | \(count("high")) | \(count("medium")) | \(count("low")) | \(length - count("critical") - count("high") - count("medium") - count("low")) |"),
-            "",
-            ($all | map(select(.severity == "critical" and .fixed)) | unique | sort_by(.id, .package, .tool)
-              | if length == 0 then "No Critical vulnerability with a fix."
-                else "Critical, with a fix:", "", "| Scanner | Vulnerability | Package | Version | Fixed in |", "| --- | --- | --- | --- | --- |",
-                  (.[] | "| \(.tool) | \(.id) | \(.package) | \(.version) | \(.fix) |")
-                end)
+            "", "\($heading):", "",
+            if ($gate[0] | length) == 0 then "None."
+            else
+              "| Scanner | Vulnerability | Package | Version | Fixed in |", "| --- | --- | --- | --- | --- |",
+              ($gate[0][] | "| \(.tool) | \(.id) | \(.package) | \(.version) | \(.fix) |")
+            end
         ' "$out/findings.json" >> "$GITHUB_STEP_SUMMARY"
 
         # Found by both scanners: counted once.
-        fixable="$(jq 'map(select(.severity == "critical" and .fixed) | {id, package}) | unique | length' "$out/findings.json")"
+        fixable="$(jq 'map({id, package}) | unique | length' "$out/gate.json")"
         if [[ "$FAIL" == true && "$fixable" != 0 ]]; then
-          echo "::error::$fixable Critical vulnerabilities with a fix, see the job summary"
+          echo "::error::$heading: $fixable, see the job summary"
           exit 1
         fi

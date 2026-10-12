@@ -69,13 +69,18 @@ outputs (`grype-sarif`, `trivy-sarif`) keep the High and Critical findings.
 Ignore files, at the repository root: `.grype.yaml` (`ignore:` rules) and
 `.trivyignore.yaml`. `image-scan.yml` uses it on the pushed images; to scan
 an image that is built but not pushed, in the build job, give its OCI
-layout:
+layout. In a pull request, give the pushed image it replaces as
+`baseline`: only the findings it doesn't have fail (not those of upstream's
+binaries, nor a vulnerability published since), and nothing fails when it
+can't be scanned (not pushed yet):
 
 ```yaml
 - run: podman save --format oci-dir -o "$RUNNER_TEMP/oci" "$TAG"
 - uses: spnngl/.github/.github/actions/scan-image@main
   with:
     oci-layout: ${{ runner.temp }}/oci
+    baseline: ${{ env.TAG }}
+    platform: linux/${{ env.ARCH }}
     fail: true
 ```
 
