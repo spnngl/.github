@@ -1,0 +1,134 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+# Reusable: scans the calling repository's container images on ghcr.io for
+# vulnerabilities, with the scan-image action, and uploads the High and
+# Critical findings to code scanning. Report only, it never fails on a
+# finding: a new vulnerability shows up without any change of the
+# repository, scheduled runs are the way to see it.
+#
+# The images: the tags of the `packages` pushed in the last `max-age-days`
+# days, every platform of each. Older tags are no longer rebuilt: not worth
+# an alert. The packages are given, not listed: the API listing an owner's
+# packages refuses GITHUB_TOKEN (HTTP 400). The calling repository needs
+# access to each package, which it has when its workflows pushed it.
+# The job needs `contents: read` (ignore files, see the action),
+# `packages: read` and `security-events: write`.
+
+name: Image Scanning
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: The owner's container packages to scan, whitespace-separated, e.g. `images/fedora`. None scans nothing.
+        type: string
+        default: ""
+      max-age-days:
+        description: Scan the tags pushed in the last this many days. Longer than the interval between the caller's rebuilds.
+        type: number
+        default: 8
+
+permissions: {}
+
+jobs:
+  discover:
+    name: Find images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: read
+    outputs:
+      images: ${{ steps.find.outputs.images }}
+    steps:
+      # Private packages' manifests too.
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+
+      # One {image, platform} per line. sha256-* tags are cosign's
+      # signatures and attestations, not images. The platforms: the
+      # manifest list's, attestation manifests (unknown/unknown) excepted,
+      # or the image's own.
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_AGE_DAYS: ${{ inputs.max-age-days }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          set -euo pipefail
+          read -ra packages -d '' <<< "$PACKAGES" || true
+          if (( ${#packages[@]} == 0 )); then echo "::warning::No package given, nothing to scan."; fi
+          owner="$GITHUB_REPOSITORY_OWNER"
+          if [[ "$(gh api "users/$owner" --jq .type)" == Organization ]]; then api="orgs/$owner"; else api="users/$owner"; fi
+          since="$(date -u -d "-${MAX_AGE_DAYS} days" +%FT%TZ)"
+          registry="ghcr.io/${owner,,}"
+          for package in "${packages[@]}"; do
+            if [[ ! "$package" =~ ^[a-z0-9][a-z0-9._/-]*$ ]]; then
+              echo "::error title=Invalid package name::$package" >&2
+              exit 1
+            fi
+            gh api --paginate "$api/packages/container/${package//\//%2F}/versions" \
+              --jq ".[] | select(.updated_at >= \"$since\") | .metadata.container.tags[] | select(startswith(\"sha256-\") | not)" |
+            while read -r tag; do
+              image="$registry/$package:$tag"
+              manifest="$(docker buildx imagetools inspect --raw "$image")"
+              if jq -e '.manifests' <<< "$manifest" > /dev/null; then
+                jq -r '.manifests[].platform | select(.os != "unknown") | [.os, .architecture, .variant // empty] | join("/")' <<< "$manifest"
+              else
+                docker buildx imagetools inspect --format '{{ json .Image }}' "$image" | jq -r '[.os, .architecture, .variant // empty] | join("/")'
+              fi | jq -cR --arg image "$image" '{image: $image, platform: .}'
+            done
+          done | jq -cs . > "$RUNNER_TEMP/images.json"
+          jq . "$RUNNER_TEMP/images.json"
+          echo "images=$(< "$RUNNER_TEMP/images.json")" >> "$GITHUB_OUTPUT"
+
+  scan:
+    name: Scan ${{ matrix.image }} ${{ matrix.platform }}
+    needs: discover
+    if: needs.discover.outputs.images != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.images) }}
+    steps:
+      # The ignore files.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Private packages too.
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+
+      # Remote, not `./`: a local path would resolve in the caller's checkout.
+      - id: scan
+        name: Scan
+        uses: spnngl/.github/.github/actions/scan-image@main
+        with:
+          image: ${{ matrix.image }}
+          platform: ${{ matrix.platform }}
+          fail: false
+
+      # Code scanning tracks alerts per category: one per image, platform
+      # and scanner, so that fixed findings close.
+      - name: Upload Grype SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: ${{ steps.scan.outputs.grype-sarif }}
+          category: grype-${{ matrix.image }}-${{ matrix.platform }}
+
+      - name: Upload Trivy SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: ${{ steps.scan.outputs.trivy-sarif }}
+          category: trivy-${{ matrix.image }}-${{ matrix.platform }}
