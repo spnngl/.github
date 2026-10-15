@@ -37,7 +37,7 @@ jobs:
         with:
           advanced-security: false
           # renovate: datasource=pypi depName=zizmor
-          version: "1.31.0"
+          version: "1.31.1"
 
   conventional-commits:
     permissions:
