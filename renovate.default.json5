@@ -26,6 +26,13 @@
             "automerge": true
         },
         {
+            "description": "GitHub Actions: automerge major updates too once CI is green. A deprecated runtime (Node 20) is only fixed by a major.",
+            "matchManagers": ["github-actions"],
+            "matchDepTypes": ["action"],
+            "matchUpdateTypes": ["major"],
+            "automerge": true
+        },
+        {
             "description": "Shared workflows and actions of spnngl/.github are called at @main on purpose: never pin them to a digest.",
             "matchDepNames": ["spnngl/.github"],
             "enabled": false
