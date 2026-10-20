@@ -91,7 +91,8 @@ A registry image instead: `image: ghcr.io/<owner>/<name>:<tag>` and
 
 [`renovate.default.json5`](renovate.default.json5): `config:best-practices`,
 semantic commits, `Europe/Paris` timezone, `dependencies` label, automerge of
-non-major updates under `.github/`, and versions annotated with a
+non-major updates under `.github/` and of every GitHub Actions update, and
+versions annotated with a
 `# renovate:` comment in workflows and actions:
 
 ```yaml
