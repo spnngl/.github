@@ -13,6 +13,7 @@ shared Renovate preset keeps Renovate from pinning these references.
 | [`conventional-commits.yml`](.github/workflows/conventional-commits.yml) | `pull_request` | `contents: read`, `pull-requests: read` | `allowed-commit-types` |
 | [`betterleaks.yml`](.github/workflows/betterleaks.yml): secrets in the git history | `pull_request` | `contents: read`, `security-events: write` | `confidence` |
 | [`betterleaks-github.yml`](.github/workflows/betterleaks-github.yml): secrets in PRs, issues, comments | `schedule` | `contents: read`, `issues: read`, `pull-requests: read`, `security-events: write` | `confidence` |
+| [`lint-workflows.yml`](.github/workflows/lint-workflows.yml): actionlint and zizmor, configured by the caller's `.github/actionlint.yaml` and `.github/zizmor.yml` | `pull_request` | `contents: read` | none |
 | [`renovate.yml`](.github/workflows/renovate.yml): `renovate-config-validator --strict` | `pull_request` / `push` on the Renovate config | `contents: read` | `config-files` |
 | [`image-scan.yml`](.github/workflows/image-scan.yml): vulnerabilities in the repository's ghcr.io images, with `scan-image` | `schedule` | `contents: read`, `packages: read`, `security-events: write` | `packages`, `max-age-days` |
 
