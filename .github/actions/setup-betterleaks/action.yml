@@ -13,7 +13,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=github-releases depName=betterleaks/betterleaks
-        BETTERLEAKS_VERSION: "1.9.0"
+        BETTERLEAKS_VERSION: "1.10.1"
       run: |
         set -euo pipefail
         cd "$RUNNER_TEMP"
