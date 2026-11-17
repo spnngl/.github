@@ -64,7 +64,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=github-releases depName=anchore/grype
-        GRYPE_VERSION: "0.121.2"
+        GRYPE_VERSION: "0.121.3"
         # renovate: datasource=github-releases depName=aquasecurity/trivy
         TRIVY_VERSION: "0.76.2"
       run: |
