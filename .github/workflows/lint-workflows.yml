@@ -32,4 +32,4 @@ jobs:
         with:
           advanced-security: false
           # renovate: datasource=pypi depName=zizmor
-          version: "1.32.0"
+          version: "1.33.0"
